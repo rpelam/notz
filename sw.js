@@ -1,9 +1,10 @@
-const VERSION = "notz-v1";
+const VERSION = "notz-v2";
 const SHELL = [
   "./",
   "./index.html",
   "./styles.css",
   "./app.js",
+  "./date-fr.js",
   "./vendor/supabase.js",
   "./manifest.webmanifest",
   "./icons/icon-192.png",
@@ -29,14 +30,14 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
   event.respondWith(
     caches.open(VERSION).then(async (cache) => {
-      const cached = await cache.match(req, { ignoreSearch: true });
-      const network = fetch(req)
-        .then((res) => {
-          if (res && res.ok) cache.put(req, res.clone());
-          return res;
-        })
-        .catch(() => null);
-      return cached || (await network) || (await cache.match("./index.html"));
+      // Network first so updates show up at once; cache when offline
+      try {
+        const res = await fetch(req, { cache: "no-cache" });
+        if (res && res.ok) cache.put(req, res.clone());
+        return res;
+      } catch (e) {
+        return (await cache.match(req, { ignoreSearch: true })) || (await cache.match("./index.html"));
+      }
     })
   );
 });

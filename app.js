@@ -11,10 +11,11 @@ const sb = supabase.createClient(CFG.url, CFG.key, { auth: { persistSession: tru
 
 const $ = (s) => document.querySelector(s);
 const state = {
-  user: null, notes: [], pending: [], tags: new Set(), view: "rem", filter: null, q: "",
-  remindManual: false, saving: false, alerted: new Set(), interacted: false,
-  urls: new Map(), channel: null, rec: null, focusId: null, setupMode: false
+  user: null, notes: [], view: "rem", q: "", urls: new Map(), channel: null,
+  alerted: new Set(), interacted: false, focusId: null, setupMode: false
 };
+let ed = null; // editor state
+let rec = null; // recorder state
 
 /* ---------- helpers ---------- */
 function h(tag, attrs, ...kids) {
@@ -22,6 +23,7 @@ function h(tag, attrs, ...kids) {
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v == null || v === false) continue;
     if (k === "class") el.className = v;
+    else if (k === "html") el.innerHTML = v;
     else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
     else el.setAttribute(k, v === true ? "" : v);
   }
@@ -29,89 +31,79 @@ function h(tag, attrs, ...kids) {
   return el;
 }
 const pad = (n) => String(n).padStart(2, "0");
-const toLocalInput = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-const fmt = (ms) => new Date(ms).toLocaleString("fr-CA", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).replace(",", " ·");
-const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
 const ms = (v) => (v == null ? null : +new Date(v));
+const toLocalInput = (t) => { const d = new Date(t); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
+const hm = (t) => { const d = new Date(t); return `${d.getHours()} h ${pad(d.getMinutes())}`; };
+function when(t) {
+  const d = new Date(t), now = new Date();
+  const tom = new Date(now); tom.setDate(tom.getDate() + 1);
+  const yes = new Date(now); yes.setDate(yes.getDate() - 1);
+  if (sameDay(d, now)) return "Aujourd'hui, " + hm(d);
+  if (sameDay(d, tom)) return "Demain, " + hm(d);
+  if (sameDay(d, yes)) return "Hier, " + hm(d);
+  const diff = (d - now) / 86400000;
+  if (diff > 0 && diff < 6) return d.toLocaleDateString("fr-CA", { weekday: "long" }).replace(/^./, (c) => c.toUpperCase()) + ", " + hm(d);
+  return d.toLocaleDateString("fr-CA", { weekday: "short", day: "numeric", month: "short" }).replace(/^./, (c) => c.toUpperCase()) + ", " + hm(d);
+}
+function created(t) {
+  const d = new Date(t), now = new Date();
+  if (sameDay(d, now)) return hm(d);
+  const yes = new Date(now); yes.setDate(yes.getDate() - 1);
+  if (sameDay(d, yes)) return "Hier";
+  return d.toLocaleDateString("fr-CA", { day: "numeric", month: "short" });
+}
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) => (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16)));
 const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-const BELL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 21h4"/></svg>';
-
-function say(text, err) { const m = $("#msg"); m.textContent = text || ""; m.classList.toggle("err", !!err); }
+const ICON = {
+  bell: '<svg viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 21h4"/></svg>',
+  mic: '<svg viewBox="0 0 24 24"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3.5"/></svg>',
+  photo: '<svg viewBox="0 0 24 24"><path d="M3 8.5A1.5 1.5 0 0 1 4.5 7h2.6l1.6-2.2h6.6L16.9 7h2.6A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/><circle cx="12" cy="12.8" r="3.6"/></svg>'
+};
 function setStatus(text, bad) { const s = $("#status"); s.textContent = text || ""; s.classList.toggle("bad", !!bad); }
-function cacheNotes() { try { localStorage.setItem("notz:notes", JSON.stringify(state.notes.slice(0, 300))); } catch (e) { /* storage full or blocked */ } }
+function cacheNotes() { try { localStorage.setItem("notz:notes", JSON.stringify(state.notes.slice(0, 300))); } catch (e) { /* ignore */ } }
 function cachedNotes() { try { return JSON.parse(localStorage.getItem("notz:notes") || "[]"); } catch (e) { return []; } }
-
-/* ---------- French date detection ---------- */
-const WD = ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"];
-const MO = ["janvier", "fevrier", "mars", "avril", "mai", "juin", "juillet", "aout", "septembre", "octobre", "novembre", "decembre"];
-const KEY = /(rappel|rappelle|penser a|pense a|n'oublie|oublie pas|relancer|appeler|rdv|rendez-vous|reunion|livraison|commander|payer|envoyer)/;
-function parseFr(raw, now = new Date()) {
-  const t = raw.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/’/g, "'");
-  let m;
-  if ((m = t.match(/dans\s+(\d+|un|une)\s*(minutes?|mins?|heures?|h|jours?|semaines?)\b/))) {
-    const n = /^\d/.test(m[1]) ? +m[1] : 1, u = m[2][0], d = new Date(now);
-    if (u === "m") d.setMinutes(d.getMinutes() + n); else if (u === "h") d.setHours(d.getHours() + n);
-    else if (u === "j") d.setDate(d.getDate() + n); else d.setDate(d.getDate() + 7 * n);
-    return d;
-  }
-  let day = null, defH = 9, hasDay = false;
-  const base = new Date(now); base.setSeconds(0, 0);
-  if (/apres-demain|apres demain/.test(t)) { day = new Date(base); day.setDate(day.getDate() + 2); hasDay = true; }
-  else if (/\bdemain\b/.test(t)) { day = new Date(base); day.setDate(day.getDate() + 1); hasDay = true; if (/demain soir/.test(t)) defH = 19; if (/demain apres-midi/.test(t)) defH = 14; }
-  else if (/ce soir/.test(t)) { day = new Date(base); defH = 19; hasDay = true; }
-  else if (/cet apres-midi|cet aprem/.test(t)) { day = new Date(base); defH = 14; hasDay = true; }
-  else if (/ce matin|aujourd'hui|aujourd hui/.test(t)) { day = new Date(base); hasDay = true; }
-  if (!day) {
-    for (let i = 0; i < 7; i++) {
-      if (new RegExp("\\b" + WD[i] + "\\b").test(t)) { let diff = (i - base.getDay() + 7) % 7; if (diff === 0) diff = 7; day = new Date(base); day.setDate(day.getDate() + diff); hasDay = true; break; }
-    }
-  }
-  if (!day && (m = t.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/))) {
-    const y = m[3] ? (m[3].length === 2 ? 2000 + +m[3] : +m[3]) : base.getFullYear();
-    day = new Date(y, +m[2] - 1, +m[1]); if (!m[3] && day < new Date(base.toDateString())) day.setFullYear(y + 1); hasDay = true;
-  }
-  if (!day && (m = t.match(new RegExp("\\b(\\d{1,2})(?:er)?\\s+(" + MO.join("|") + ")\\b")))) {
-    const y = base.getFullYear(); day = new Date(y, MO.indexOf(m[2]), +m[1]); if (day < new Date(base.toDateString())) day.setFullYear(y + 1); hasDay = true;
-  }
-  let hh = null, mm = 0;
-  if ((m = t.match(/\b(?:a\s+)?(\d{1,2})\s*h\s*(\d{2})?\b/)) && +m[1] < 24) { hh = +m[1]; mm = m[2] ? +m[2] : 0; }
-  else if ((m = t.match(/\b(\d{1,2}):(\d{2})\b/)) && +m[1] < 24) { hh = +m[1]; mm = +m[2]; }
-  else if (/\bmidi\b/.test(t)) { hh = 12; }
-  if (!hasDay && hh == null) return null;
-  if (!hasDay && !KEY.test(t)) return null; // a lone "3h" in a recipe is not a reminder
-  if (!day) { day = new Date(base); day.setHours(hh, mm, 0, 0); if (day <= now) day.setDate(day.getDate() + 1); return day; }
-  day.setHours(hh == null ? defH : hh, hh == null ? 0 : mm, 0, 0);
-  return day;
+function titleOf(n) {
+  const lines = (n.text || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.length) return { title: lines[0], rest: lines.slice(1).join(" "), plain: false };
+  const m = n.media || [];
+  if (m.some((x) => x.kind === "audio")) return { title: "Note vocale", rest: "", plain: true };
+  if (m.some((x) => x.kind === "photo")) return { title: "Photo", rest: "", plain: true };
+  return { title: "Note vide", rest: "", plain: true };
 }
+
+/* Keep full-screen sheets above the iOS keyboard */
+function fitViewport() {
+  const vv = window.visualViewport;
+  const hgt = vv ? vv.height : window.innerHeight;
+  document.documentElement.style.setProperty("--vvh", hgt + "px");
+  document.body.classList.toggle("keyboard-open", vv ? vv.height < window.innerHeight - 120 : false);
+  for (const s of document.querySelectorAll(".sheet")) s.style.transform = vv && vv.offsetTop ? `translateY(${vv.offsetTop}px)` : "";
+}
+if (window.visualViewport) { visualViewport.addEventListener("resize", fitViewport); visualViewport.addEventListener("scroll", fitViewport); }
+window.addEventListener("resize", fitViewport);
+fitViewport();
 
 /* ---------- Auth ---------- */
 async function showAuth() {
-  $("#mainView").hidden = true; $("#settingsView").hidden = true; $("#settingsBtn").hidden = true;
+  for (const id of ["#homeView", "#toolbar", "#editor", "#settings"]) $(id).hidden = true;
   $("#authView").hidden = false;
-  setStatus("");
   let configured = true;
-  try {
-    const { data } = await sb.functions.invoke("notz-setup", { body: { check: true } });
-    configured = !!data?.configured;
-  } catch (e) { /* offline: assume sign-in */ }
+  try { const { data } = await sb.functions.invoke("notz-setup", { body: { check: true } }); configured = !!data?.configured; } catch (e) { /* offline */ }
   state.setupMode = !configured;
-  $("#authTitle").textContent = configured ? "Connexion" : "Créer ton compte Notz";
-  $("#authIntro").textContent = configured
-    ? "Connecte-toi une fois sur chaque appareil. Notz reste ensuite ouvert."
-    : "Première ouverture : choisis le courriel et le mot de passe de ton compte. Ce compte sera le seul à pouvoir utiliser Notz.";
+  $("#authTitle").textContent = configured ? "Notz" : "Bienvenue dans Notz";
+  $("#authIntro").textContent = configured ? "Connecte-toi une fois sur cet appareil. Notz reste ensuite ouvert." : "Crée ton compte. Il sera le seul à pouvoir utiliser Notz.";
   $("#confirmWrap").hidden = configured;
   $("#authPass").autocomplete = configured ? "current-password" : "new-password";
-  $("#authBtn").textContent = configured ? "Se connecter" : "Créer le compte";
+  $("#authBtn").textContent = configured ? "Se connecter" : "Créer mon compte";
 }
 $("#authForm").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const email = $("#authEmail").value.trim(), pass = $("#authPass").value;
-  const msg = $("#authMsg"); msg.classList.add("err");
+  const email = $("#authEmail").value.trim(), pass = $("#authPass").value, msg = $("#authMsg");
   if (!email || pass.length < 8) { msg.textContent = "Entre ton courriel et un mot de passe d'au moins 8 caractères."; return; }
   if (state.setupMode && pass !== $("#authPass2").value) { msg.textContent = "Les deux mots de passe ne sont pas identiques."; return; }
-  $("#authBtn").disabled = true; msg.classList.remove("err"); msg.textContent = state.setupMode ? "Création du compte…" : "Connexion…";
+  $("#authBtn").disabled = true; msg.textContent = "";
   try {
     if (state.setupMode) {
       const { data, error } = await sb.functions.invoke("notz-setup", { body: { email, password: pass } });
@@ -119,132 +111,10 @@ $("#authForm").addEventListener("submit", async (e) => {
     }
     const { error } = await sb.auth.signInWithPassword({ email, password: pass });
     if (error) throw error;
-    msg.textContent = "";
   } catch (err) {
-    msg.classList.add("err");
     msg.textContent = state.setupMode ? "La création du compte a échoué. Vérifie ta connexion et réessaie." : "Courriel ou mot de passe incorrect.";
   } finally { $("#authBtn").disabled = false; }
 });
-
-/* ---------- Composer ---------- */
-function renderTagChips() {
-  $("#tagChips").replaceChildren(...TAGS.map((tg) => h("button", { type: "button", class: "chip", "aria-pressed": state.tags.has(tg) ? "true" : "false", onclick: () => { state.tags.has(tg) ? state.tags.delete(tg) : state.tags.add(tg); renderTagChips(); } }, tg)));
-  $("#filterChips").replaceChildren(...[null, ...TAGS].map((tg) => h("button", { type: "button", class: "chip", "aria-pressed": state.filter === tg ? "true" : "false", onclick: () => { state.filter = tg; renderTagChips(); render(); } }, tg || "Toutes")));
-}
-function setReminder(t, why) {
-  $("#remindRow").hidden = t == null;
-  $("#remindBtn").classList.toggle("on", t != null);
-  $("#remindAt").value = t == null ? "" : toLocalInput(t);
-  $("#detected").textContent = why || "";
-}
-let detectTimer;
-$("#noteText").addEventListener("input", () => {
-  clearTimeout(detectTimer);
-  detectTimer = setTimeout(() => {
-    if (state.remindManual) return;
-    const d = parseFr($("#noteText").value);
-    if (d) setReminder(+d, "détecté dans le texte"); else if ($("#detected").textContent) setReminder(null);
-  }, 300);
-});
-$("#remindBtn").onclick = () => {
-  if (!$("#remindRow").hidden) { $("#remindAt").focus(); return; }
-  const d = new Date(); d.setHours(d.getHours() + 1, 0, 0, 0); state.remindManual = true; setReminder(+d, ""); $("#remindAt").focus();
-};
-$("#remindAt").addEventListener("change", () => { state.remindManual = true; $("#detected").textContent = ""; });
-$("#clearRemind").onclick = () => { state.remindManual = true; setReminder(null); };
-
-function renderPending() {
-  $("#attachPreview").replaceChildren(...state.pending.map((p, i) => h("div", { class: "thumb" },
-    p.kind === "photo" ? h("img", { src: p.preview, alt: "" }) : "Vocal\n" + p.label,
-    h("button", { type: "button", "aria-label": "Retirer", onclick: () => { if (p.preview) URL.revokeObjectURL(p.preview); state.pending.splice(i, 1); renderPending(); } }, "×"))));
-}
-async function shrinkImage(file) {
-  try {
-    const bmp = await createImageBitmap(file);
-    const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
-    const c = document.createElement("canvas"); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
-    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
-    const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.82));
-    return blob || file;
-  } catch (e) { return file; }
-}
-$("#photoInput").addEventListener("change", async (e) => {
-  for (const f of e.target.files) { const blob = await shrinkImage(f); state.pending.push({ kind: "photo", blob, preview: URL.createObjectURL(blob) }); }
-  e.target.value = ""; renderPending();
-});
-
-/* ---------- Voice recording ---------- */
-function pickMime() {
-  for (const t of ["audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg"]) if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
-  return "";
-}
-async function startRec() {
-  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) { say("L'enregistrement vocal n'est pas disponible sur ce navigateur.", true); return; }
-  let stream;
-  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-  catch (e) { say("Accès au micro refusé. Autorise-le dans les réglages de l'appareil pour Notz.", true); return; }
-  const mime = pickMime();
-  const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
-  const chunks = [];
-  rec.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
-  const t0 = Date.now();
-  state.rec = { rec, stream, chunks, t0, cancelled: false, timer: setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); $("#recTime").textContent = `${Math.floor(s / 60)}:${pad(s % 60)}`; if (s >= 600) stopRec(); }, 250) };
-  rec.onstop = () => {
-    const r = state.rec; state.rec = null;
-    clearInterval(r.timer); r.stream.getTracks().forEach((t) => t.stop());
-    $("#recBar").hidden = true; $("#voiceBtn").classList.remove("live");
-    if (r.cancelled || !r.chunks.length) return;
-    const type = (rec.mimeType || mime || "audio/mp4").split(";")[0];
-    const blob = new Blob(r.chunks, { type });
-    const secs = Math.max(1, Math.round((Date.now() - r.t0) / 1000));
-    state.pending.push({ kind: "audio", blob, label: `${Math.floor(secs / 60)}:${pad(secs % 60)}`, duration: secs });
-    renderPending();
-  };
-  rec.start(1000);
-  $("#recTime").textContent = "0:00"; $("#recBar").hidden = false; $("#voiceBtn").classList.add("live");
-}
-function stopRec(cancel) { if (!state.rec) return; state.rec.cancelled = !!cancel; try { state.rec.rec.stop(); } catch (e) { /* already stopped */ } }
-$("#voiceBtn").onclick = () => { state.interacted = true; state.rec ? stopRec() : startRec(); };
-$("#recStop").onclick = () => stopRec();
-$("#recCancel").onclick = () => stopRec(true);
-
-/* ---------- Save ---------- */
-const extOf = (type) => ({ "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/heic": "heic", "audio/mp4": "m4a", "audio/webm": "webm", "audio/ogg": "ogg" }[type] || "bin");
-$("#saveBtn").onclick = async () => {
-  state.interacted = true;
-  if (state.rec) { say("Termine d'abord l'enregistrement vocal.", true); return; }
-  const text = $("#noteText").value.trim();
-  if (!text && !state.pending.length) { say("Écris quelque chose, dicte un vocal ou ajoute une photo.", true); return; }
-  state.saving = true; $("#saveBtn").disabled = true;
-  const id = uuid();
-  const uploaded = [];
-  try {
-    const media = [];
-    let i = 0;
-    for (const p of state.pending) {
-      const type = (p.blob.type || (p.kind === "photo" ? "image/jpeg" : "audio/mp4")).split(";")[0];
-      const path = `${state.user.id}/${id}/${++i}.${extOf(type)}`;
-      say(p.kind === "photo" ? `Envoi de la photo ${i}…` : "Envoi du vocal…");
-      const { error } = await sb.storage.from(CFG.bucket).upload(path, p.blob, { contentType: type, upsert: false });
-      if (error) throw Object.assign(new Error("upload"), { detail: error.message });
-      uploaded.push(path);
-      media.push({ path, kind: p.kind, type, duration: p.duration || null });
-    }
-    const remindAt = $("#remindRow").hidden || !$("#remindAt").value ? null : new Date($("#remindAt").value).toISOString();
-    const row = { id, user_id: state.user.id, text, media, tags: [...state.tags], remind_at: remindAt };
-    const { data, error } = await sb.from("notz_notes").insert(row).select().single();
-    if (error) throw error;
-    upsertLocal(data);
-    state.pending.forEach((p) => p.preview && URL.revokeObjectURL(p.preview));
-    $("#noteText").value = ""; state.pending = []; state.tags.clear(); state.remindManual = false;
-    setReminder(null); renderPending(); renderTagChips();
-    say(remindAt ? "Enregistré. Rappel le " + fmt(ms(remindAt)) + "." : "Enregistré.");
-    if (remindAt) maybeNudgePush();
-  } catch (e) {
-    if (uploaded.length) sb.storage.from(CFG.bucket).remove(uploaded).catch(() => {});
-    say(navigator.onLine === false ? "Pas de réseau : la note est restée dans le champ, réessaie dès que tu as du signal." : "L'enregistrement a échoué. Ta note est toujours là, réessaie.", true);
-  } finally { state.saving = false; $("#saveBtn").disabled = false; }
-};
 
 /* ---------- Data ---------- */
 function upsertLocal(n) {
@@ -278,72 +148,81 @@ function subscribe() {
 }
 async function patch(n, data) {
   const { data: row, error } = await sb.from("notz_notes").update(data).eq("id", n.id).select().single();
-  if (error) { say("La modification n'a pas été enregistrée. Vérifie ta connexion.", true); return; }
-  upsertLocal(row);
-}
-function snooze(n, kind) {
-  let d = new Date();
-  if (kind === "1h") d = new Date(Math.max(Date.now(), ms(n.remind_at) || 0) + 3600000);
-  else { d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); }
-  state.alerted.delete(n.id);
-  patch(n, { remind_at: d.toISOString(), done: false });
-}
-async function removeNote(n, btn) {
-  if (btn.dataset.armed !== "1") { btn.dataset.armed = "1"; btn.textContent = "Confirmer la suppression"; setTimeout(() => { btn.dataset.armed = ""; btn.textContent = "Supprimer"; }, 3500); return; }
-  const { error } = await sb.from("notz_notes").delete().eq("id", n.id);
-  if (error) { say("Suppression impossible. Vérifie ta connexion.", true); return; }
-  const paths = (n.media || []).map((m) => m.path);
-  if (paths.length) sb.storage.from(CFG.bucket).remove(paths).catch(() => {});
-  state.notes = state.notes.filter((x) => x.id !== n.id); cacheNotes(); render();
+  if (error) { setStatus("Modification non enregistrée", true); return null; }
+  upsertLocal(row); return row;
 }
 
 /* ---------- List ---------- */
 function remState(n, now = Date.now()) {
   const r = ms(n.remind_at);
   if (r == null) return null;
-  if (n.done) return { cls: "done", label: "Fait" };
-  if (r <= now) return { cls: "late", label: "À faire maintenant" };
-  if (sameDay(r, now)) return { cls: "today", label: "Aujourd'hui" };
-  return { cls: "soon", label: "À venir" };
+  if (n.done) return "done";
+  if (r <= now) return "late";
+  if (sameDay(r, now)) return "today";
+  return "soon";
 }
-function card(n) {
+function row(n) {
   const rs = remState(n);
-  const photos = (n.media || []).filter((m) => m.kind === "photo"), audios = (n.media || []).filter((m) => m.kind === "audio");
-  const el = h("article", { class: "note" + (rs?.cls === "late" ? " late" : "") + (n.done ? " done" : ""), id: "n-" + n.id },
-    h("div", { class: "meta" }, h("time", { datetime: n.created_at }, fmt(ms(n.created_at))), (n.tags || []).map((t) => h("span", { class: "tag" }, t))),
-    n.text ? h("p", { class: "text" }, n.text) : null,
-    photos.length ? h("div", { class: "photos" }, photos.map((m) => { const u = state.urls.get(m.path); return u ? h("a", { href: u, target: "_blank", rel: "noopener" }, h("img", { src: u, alt: "Photo de la note", loading: "lazy" })) : h("a", {}, ""); })) : null,
-    audios.map((m) => { const u = state.urls.get(m.path); return u ? h("audio", { controls: true, preload: "metadata", src: u }) : null; }),
-    rs ? h("div", { class: "rem" }, h("span", { class: "bell", "aria-hidden": "true" }), h("time", {}, fmt(ms(n.remind_at))), h("span", { class: "pill " + rs.cls }, rs.label)) : null,
-    h("div", { class: "acts" },
-      rs && !n.done ? h("button", { type: "button", class: "act", onclick: () => patch(n, { done: true }) }, "Fait") : null,
-      rs && n.done ? h("button", { type: "button", class: "act", onclick: () => patch(n, { done: false }) }, "Rouvrir") : null,
-      rs && !n.done ? h("button", { type: "button", class: "act", onclick: () => snooze(n, "1h") }, "+1 h") : null,
-      rs && !n.done ? h("button", { type: "button", class: "act", onclick: () => snooze(n, "demain") }, "Demain 9 h") : null,
-      !rs ? h("button", { type: "button", class: "act", onclick: () => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); patch(n, { remind_at: d.toISOString(), done: false }); } }, "Rappel demain 9 h") : null,
-      h("button", { type: "button", class: "act warn", onclick: (e) => removeNote(n, e.currentTarget) }, "Supprimer")));
-  const b = el.querySelector(".bell"); if (b) b.innerHTML = BELL;
+  const { title, rest, plain } = titleOf(n);
+  const photo = (n.media || []).find((m) => m.kind === "photo");
+  const hasAudio = (n.media || []).some((m) => m.kind === "audio");
+  const sub = h("div", { class: "row-sub" });
+  if (rs) sub.append(h("span", { class: "when " + (rs === "late" ? "late" : rs === "today" ? "today" : "") }, when(ms(n.remind_at))));
+  else sub.append(h("span", { class: "when" }, created(n.created_at)));
+  if (rest) sub.append(h("span", { class: "snippet" }, rest));
+  else if ((n.tags || []).length) sub.append(h("span", { class: "snippet" }, n.tags.join(" · ")));
+  const el = h("div", { class: "row" + (n.done ? " done" : ""), id: "n-" + n.id, role: "button", tabindex: "0" },
+    rs ? h("button", { type: "button", class: "check-hit", "aria-label": n.done ? "Rouvrir le rappel" : "Marquer comme fait", onclick: (e) => { e.stopPropagation(); patch(n, { done: !n.done }); } }, h("span", { class: "check" + (n.done ? " on" : "") })) : null,
+    h("div", { class: "row-main" },
+      h("div", { class: "row-text" }, h("div", { class: "row-title" + (plain ? " plain" : "") }, title), sub),
+      hasAudio && !photo ? h("span", { class: "row-icon", html: ICON.mic }) : null,
+      photo && state.urls.get(photo.path) ? h("img", { class: "row-thumb", src: state.urls.get(photo.path), alt: "", loading: "lazy" }) : null));
+  el.addEventListener("click", () => openEditor(n));
+  el.addEventListener("keydown", (e) => { if (e.key === "Enter") openEditor(n); });
   return el;
 }
+function section(title, items, cls, count) {
+  if (!items.length) return [];
+  return [h("h2", { class: "section-title" + (cls ? " " + cls : "") }, title, count ? h("small", {}, String(items.length)) : null), h("div", { class: "group" }, items.map(row))];
+}
 function render() {
-  const q = state.q.toLowerCase();
-  let items = state.notes.filter((n) => (!state.filter || (n.tags || []).includes(state.filter)) && (!q || (n.text || "").toLowerCase().includes(q)));
+  if (!state.user) return;
+  const q = state.q.trim().toLowerCase();
+  const match = (n) => !q || (n.text || "").toLowerCase().includes(q) || (n.tags || []).some((t) => t.toLowerCase().includes(q));
+  const notes = state.notes.filter(match);
   const open = state.notes.filter((n) => n.remind_at && !n.done);
-  $("#cntR").textContent = open.length || "";
-  $("#cntA").textContent = state.notes.length || "";
+  $("#countLabel").textContent = state.notes.length ? (state.notes.length === 1 ? "1 note" : state.notes.length + " notes") : "";
+  $("#tabRem").textContent = open.length ? `Rappels (${open.length})` : "Rappels";
+  const parts = [];
   if (state.view === "rem") {
-    const o = items.filter((n) => n.remind_at && !n.done).sort((a, b) => ms(a.remind_at) - ms(b.remind_at));
-    const d = items.filter((n) => n.remind_at && n.done).sort((a, b) => ms(b.remind_at) - ms(a.remind_at)).slice(0, 10);
-    items = [...o, ...d];
+    const now = Date.now();
+    const o = notes.filter((n) => n.remind_at && !n.done).sort((a, b) => ms(a.remind_at) - ms(b.remind_at));
+    parts.push(...section("En retard", o.filter((n) => ms(n.remind_at) <= now), "red", true));
+    parts.push(...section("Aujourd'hui", o.filter((n) => ms(n.remind_at) > now && sameDay(ms(n.remind_at), now))));
+    parts.push(...section("Plus tard", o.filter((n) => ms(n.remind_at) > now && !sameDay(ms(n.remind_at), now))));
+    parts.push(...section("Faits", notes.filter((n) => n.remind_at && n.done).sort((a, b) => ms(b.remind_at) - ms(a.remind_at)).slice(0, 15)));
+  } else {
+    const now = new Date(); const yes = new Date(now); yes.setDate(yes.getDate() - 1);
+    const wk = new Date(now); wk.setDate(wk.getDate() - 7);
+    parts.push(...section("Aujourd'hui", notes.filter((n) => sameDay(ms(n.created_at), now))));
+    parts.push(...section("Hier", notes.filter((n) => sameDay(ms(n.created_at), yes))));
+    parts.push(...section("7 derniers jours", notes.filter((n) => ms(n.created_at) < +yes && !sameDay(ms(n.created_at), yes) && ms(n.created_at) >= +wk)));
+    parts.push(...section("Plus ancien", notes.filter((n) => ms(n.created_at) < +wk)));
   }
-  $("#list").replaceChildren(...items.map(card));
-  const e = $("#empty");
-  e.hidden = items.length > 0;
-  e.textContent = state.notes.length === 0 ? "Rien ici pour l'instant. Écris, dicte ou photographie, puis touche « Enregistrer »."
-    : state.view === "rem" && !q && !state.filter ? "Aucun rappel en cours. Mets une date dans une note (« demain 14h », « jeudi ») pour en créer un."
-    : "Aucune note ne correspond.";
+  $("#list").replaceChildren(...parts);
+  const empty = !parts.length;
+  $("#empty").hidden = !empty;
+  if (empty) {
+    $("#emptyText").innerHTML = q ? "Aucune note ne correspond à ta recherche."
+      : state.notes.length === 0 ? "Aucune note pour l'instant.<br><br>Touche le <b>crayon</b> en bas à droite pour écrire, le <b>micro</b> pour un vocal, l'<b>appareil photo</b> pour une photo."
+      : state.view === "rem" ? "Aucun rappel en cours.<br><br>Écris une heure dans une note, par exemple « appel fournisseur jeudi 10h », et le rappel se crée tout seul."
+      : "Aucune note.";
+  }
   checkDue();
-  if (state.focusId) { const el = document.getElementById("n-" + state.focusId); if (el) { el.scrollIntoView({ behavior: "smooth", block: "start" }); el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 2500); state.focusId = null; } }
+  if (state.focusId) {
+    const el = document.getElementById("n-" + state.focusId);
+    if (el) { el.scrollIntoView({ behavior: "smooth", block: "center" }); el.classList.add("flash"); const n = state.notes.find((x) => x.id === state.focusId); state.focusId = null; if (n) setTimeout(() => openEditor(n), 400); }
+  }
 }
 function setView(v) {
   state.view = v;
@@ -366,15 +245,208 @@ function chime() {
 }
 function checkDue() {
   const now = Date.now();
-  const due = state.notes.filter((n) => n.remind_at && !n.done && ms(n.remind_at) <= now).sort((a, b) => ms(a.remind_at) - ms(b.remind_at));
-  $("#dueBanner").hidden = !due.length;
-  $("#dueTitle").textContent = due.length > 1 ? due.length + " rappels à traiter" : "Rappel à traiter";
-  $("#dueList").replaceChildren(...due.slice(0, 4).map((n) => h("li", {}, (n.text || "Note avec média").split("\n")[0].slice(0, 80))));
+  const due = state.notes.filter((n) => n.remind_at && !n.done && ms(n.remind_at) <= now);
+  $("#dueBanner").hidden = !due.length || state.view === "rem";
+  $("#dueText").textContent = due.length > 1 ? `${due.length} rappels en retard` : "1 rappel en retard";
   let fresh = false;
   for (const n of due) if (!state.alerted.has(n.id)) { state.alerted.add(n.id); if (now - ms(n.remind_at) < 5 * 60000) fresh = true; }
   if (fresh) chime();
 }
-setInterval(checkDue, 20000);
+$("#dueBanner").onclick = () => setView("rem");
+setInterval(() => { if (state.user && $("#editor").hidden) render(); }, 30000);
+
+/* ---------- Editor ---------- */
+function openSheet(el) { el.hidden = false; el.classList.remove("opening"); void el.offsetWidth; el.classList.add("opening"); fitViewport(); }
+function closeSheet(el) { el.hidden = true; }
+
+function openEditor(note, opts = {}) {
+  ed = {
+    note: note || null, id: note ? note.id : uuid(),
+    pending: [], removed: [], tags: new Set(note?.tags || []),
+    remindAt: note ? ms(note.remind_at) : null, remindSrc: "", remindManual: false, saving: false
+  };
+  $("#edTitle").textContent = note ? "Note" : "Nouvelle note";
+  $("#edText").value = note ? note.text || "" : "";
+  $("#edMsg").textContent = ""; $("#edMsg").classList.remove("err");
+  $("#edDanger").hidden = !note;
+  renderEditor();
+  openSheet($("#editor"));
+  if (opts.voice) { startRec(); return; }
+  if (opts.photo) { $("#photoInput").click(); return; }
+  if (!note) $("#edText").focus(); // opening the keyboard must happen inside the tap
+}
+function renderEditor() {
+  // reminder chip
+  const r = ed.remindAt;
+  $("#edRemind").hidden = r == null;
+  if (r != null) { $("#edRemindLabel").textContent = when(r); $("#edRemindAt").value = toLocalInput(r); }
+  $("#edRemindSrc").textContent = ed.remindSrc;
+  $("#accRemind").classList.toggle("on", r != null);
+  // media
+  const box = $("#edMedia"); box.replaceChildren();
+  const existing = (ed.note?.media || []).filter((m) => !ed.removed.includes(m.path));
+  const photos = [
+    ...existing.filter((m) => m.kind === "photo").map((m) => ({ src: state.urls.get(m.path), href: state.urls.get(m.path), drop: () => { ed.removed.push(m.path); renderEditor(); } })),
+    ...ed.pending.filter((p) => p.kind === "photo").map((p) => ({ src: p.preview, drop: () => { ed.pending.splice(ed.pending.indexOf(p), 1); renderEditor(); } }))
+  ];
+  if (photos.length) box.append(h("div", { class: "ed-photos" }, photos.map((p) => h("div", { class: "ph" },
+    p.href ? h("a", { href: p.href, target: "_blank", rel: "noopener" }, h("img", { src: p.src || "", alt: "Photo" })) : h("img", { src: p.src || "", alt: "Photo" }),
+    h("button", { type: "button", class: "x-btn", "aria-label": "Retirer la photo", onclick: p.drop }, "×")))));
+  const audios = [
+    ...existing.filter((m) => m.kind === "audio").map((m) => ({ src: state.urls.get(m.path), drop: () => { ed.removed.push(m.path); renderEditor(); } })),
+    ...ed.pending.filter((p) => p.kind === "audio").map((p) => ({ src: p.preview, drop: () => { ed.pending.splice(ed.pending.indexOf(p), 1); renderEditor(); } }))
+  ];
+  for (const a of audios) box.append(h("div", { class: "au" }, h("audio", { controls: true, preload: "metadata", src: a.src || "" }), h("button", { type: "button", class: "x-btn", "aria-label": "Retirer le vocal", onclick: a.drop }, "×")));
+  // tags
+  $("#edTags").replaceChildren(...TAGS.map((t) => h("button", { type: "button", class: "tag", "aria-pressed": ed.tags.has(t) ? "true" : "false", onclick: () => { ed.tags.has(t) ? ed.tags.delete(t) : ed.tags.add(t); renderEditor(); } }, t)));
+  // done toggle
+  if (ed.note) { $("#edDone").hidden = !ed.note.remind_at; $("#edDone").textContent = ed.note.done ? "Rouvrir le rappel" : "Marquer le rappel comme fait"; }
+}
+let detectTimer;
+$("#edText").addEventListener("input", () => {
+  clearTimeout(detectTimer);
+  detectTimer = setTimeout(() => {
+    if (!ed || ed.remindManual) return;
+    const d = parseFr($("#edText").value);
+    if (d) { ed.remindAt = +d; ed.remindSrc = "lu dans ta note"; }
+    else if (ed.remindSrc) { ed.remindAt = null; ed.remindSrc = ""; }
+    renderEditor();
+  }, 250);
+});
+$("#edRemindAt").addEventListener("change", (e) => { if (!e.target.value) return; ed.remindAt = +new Date(e.target.value); ed.remindManual = true; ed.remindSrc = ""; renderEditor(); });
+$("#edRemindClear").onclick = () => { ed.remindAt = null; ed.remindManual = true; ed.remindSrc = ""; renderEditor(); };
+$("#accRemind").onclick = () => {
+  if (ed.remindAt == null) { const d = new Date(); d.setHours(d.getHours() + 1, 0, 0, 0); ed.remindAt = +d; ed.remindManual = true; ed.remindSrc = "touche la date pour la changer"; renderEditor(); }
+  const inp = $("#edRemindAt");
+  try { inp.showPicker ? inp.showPicker() : inp.focus(); } catch (e) { inp.focus(); }
+};
+$("#accPhoto").onclick = () => $("#photoInput").click();
+$("#accVoice").onclick = () => { state.interacted = true; rec ? stopRec() : startRec(); };
+$("#edCancel").onclick = () => {
+  if (rec) stopRec(true);
+  ed.pending.forEach((p) => p.preview && URL.revokeObjectURL(p.preview));
+  ed = null; closeSheet($("#editor"));
+};
+$("#edDone").onclick = async () => { const n = ed.note; const r = await patch(n, { done: !n.done }); if (r) { ed = null; closeSheet($("#editor")); } };
+$("#edDelete").onclick = async (e) => {
+  const btn = e.currentTarget;
+  if (btn.dataset.armed !== "1") { btn.dataset.armed = "1"; btn.textContent = "Toucher encore pour supprimer définitivement"; setTimeout(() => { btn.dataset.armed = ""; btn.textContent = "Supprimer la note"; }, 4000); return; }
+  const n = ed.note;
+  const { error } = await sb.from("notz_notes").delete().eq("id", n.id);
+  if (error) { edSay("Suppression impossible. Vérifie ta connexion.", true); return; }
+  const paths = (n.media || []).map((m) => m.path);
+  if (paths.length) sb.storage.from(CFG.bucket).remove(paths).catch(() => {});
+  state.notes = state.notes.filter((x) => x.id !== n.id); cacheNotes(); render();
+  btn.dataset.armed = ""; btn.textContent = "Supprimer la note";
+  ed = null; closeSheet($("#editor"));
+};
+function edSay(t, err) { const m = $("#edMsg"); m.textContent = t || ""; m.classList.toggle("err", !!err); }
+
+/* Photos */
+async function shrinkImage(file) {
+  try {
+    const bmp = await createImageBitmap(file);
+    const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement("canvas"); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    return (await new Promise((r) => c.toBlob(r, "image/jpeg", 0.82))) || file;
+  } catch (e) { return file; }
+}
+$("#photoInput").addEventListener("change", async (e) => {
+  const files = [...e.target.files]; e.target.value = "";
+  if (!ed) return;
+  for (const f of files) { const blob = await shrinkImage(f); ed.pending.push({ kind: "photo", blob, preview: URL.createObjectURL(blob) }); }
+  renderEditor();
+});
+
+/* Voice */
+function pickMime() {
+  for (const t of ["audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg"]) if (window.MediaRecorder?.isTypeSupported?.(t)) return t;
+  return "";
+}
+async function startRec() {
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) { edSay("L'enregistrement vocal n'est pas disponible sur ce navigateur.", true); return; }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch (e) { edSay("Notz n'a pas accès au micro. Autorise-le dans Réglages > Notz (ou Safari) sur ton appareil.", true); return; }
+  const mime = pickMime();
+  const r = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  const chunks = [], t0 = Date.now();
+  r.ondataavailable = (ev) => { if (ev.data?.size) chunks.push(ev.data); };
+  rec = { r, stream, chunks, t0, cancelled: false, timer: setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); $("#recTime").textContent = `${Math.floor(s / 60)}:${pad(s % 60)}`; if (s >= 600) stopRec(); }, 250) };
+  r.onstop = () => {
+    const cur = rec; rec = null;
+    clearInterval(cur.timer); cur.stream.getTracks().forEach((t) => t.stop());
+    $("#recBar").hidden = true; $("#accVoice").classList.remove("on");
+    if (cur.cancelled || !cur.chunks.length || !ed) return;
+    const type = (r.mimeType || mime || "audio/mp4").split(";")[0];
+    const blob = new Blob(cur.chunks, { type });
+    ed.pending.push({ kind: "audio", blob, preview: URL.createObjectURL(blob), duration: Math.max(1, Math.round((Date.now() - cur.t0) / 1000)) });
+    renderEditor();
+  };
+  r.start(1000);
+  $("#recTime").textContent = "0:00"; $("#recBar").hidden = false; $("#accVoice").classList.add("on");
+  edSay("");
+}
+function stopRec(cancel) { if (!rec) return; rec.cancelled = !!cancel; try { rec.r.stop(); } catch (e) { /* stopped */ } }
+$("#recStop").onclick = () => stopRec();
+$("#recCancel").onclick = () => stopRec(true);
+
+/* Save */
+const extOf = (type) => ({ "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/heic": "heic", "audio/mp4": "m4a", "audio/webm": "webm", "audio/ogg": "ogg" }[type] || "bin");
+$("#edSave").onclick = async () => {
+  if (!ed || ed.saving) return;
+  if (rec) { stopRec(); await new Promise((r) => setTimeout(r, 300)); }
+  const text = $("#edText").value.trim();
+  const keptMedia = (ed.note?.media || []).filter((m) => !ed.removed.includes(m.path));
+  if (!text && !ed.pending.length && !keptMedia.length) {
+    if (ed.note) { edSay("La note est vide. Utilise « Supprimer la note » pour l'effacer.", true); return; }
+    ed = null; closeSheet($("#editor")); return; // nothing written: just close, like Notes
+  }
+  ed.saving = true; $("#edSave").disabled = true;
+  const uploaded = [];
+  try {
+    const media = [...keptMedia];
+    let i = (ed.note?.media || []).length;
+    for (const p of ed.pending) {
+      const type = (p.blob.type || (p.kind === "photo" ? "image/jpeg" : "audio/mp4")).split(";")[0];
+      const path = `${state.user.id}/${ed.id}/${++i}-${Date.now().toString(36)}.${extOf(type)}`;
+      edSay(p.kind === "photo" ? "Envoi de la photo…" : "Envoi du vocal…");
+      const { error } = await sb.storage.from(CFG.bucket).upload(path, p.blob, { contentType: type, upsert: false });
+      if (error) throw error;
+      uploaded.push(path);
+      state.urls.set(path, p.preview);
+      media.push({ path, kind: p.kind, type, duration: p.duration || null });
+    }
+    const fields = { text, media, tags: [...ed.tags], remind_at: ed.remindAt == null ? null : new Date(ed.remindAt).toISOString() };
+    let row;
+    if (ed.note) {
+      if (ms(ed.note.remind_at) !== ed.remindAt) fields.done = false;
+      const { data, error } = await sb.from("notz_notes").update(fields).eq("id", ed.note.id).select().single();
+      if (error) throw error; row = data;
+      if (ed.removed.length) sb.storage.from(CFG.bucket).remove(ed.removed).catch(() => {});
+    } else {
+      const { data, error } = await sb.from("notz_notes").insert({ id: ed.id, user_id: state.user.id, ...fields }).select().single();
+      if (error) throw error; row = data;
+    }
+    const hadReminder = fields.remind_at != null;
+    upsertLocal(row);
+    ed = null; closeSheet($("#editor"));
+    signMedia().then(render);
+    if (hadReminder) { if (state.view !== "rem") setView("rem"); maybeNudgePush(); }
+  } catch (e) {
+    if (uploaded.length) sb.storage.from(CFG.bucket).remove(uploaded).catch(() => {});
+    edSay(navigator.onLine === false ? "Pas de réseau. Ta note est toujours là : touche OK dès que tu as du signal." : "L'enregistrement a échoué. Ta note est toujours là, réessaie.", true);
+  } finally {
+    if (ed) ed.saving = false;
+    $("#edSave").disabled = false;
+  }
+};
+
+/* Toolbar shortcuts */
+$("#composeBtn").onclick = () => { state.interacted = true; openEditor(null); };
+$("#quickVoice").onclick = () => { state.interacted = true; openEditor(null, { voice: true }); };
+$("#quickPhoto").onclick = () => { state.interacted = true; openEditor(null, { photo: true }); };
 
 /* ---------- Push notifications ---------- */
 function b64ToBytes(b64) {
@@ -386,15 +458,19 @@ async function pushStatus() {
   const st = $("#pushState"), btn = $("#pushBtn"), test = $("#pushTest");
   $("#installHint").hidden = !(isIOS() && !isStandalone());
   if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
-    st.textContent = isIOS() && !isStandalone() ? "Installe d'abord Notz sur l'écran d'accueil." : "Ce navigateur ne gère pas les notifications.";
+    st.textContent = isIOS() && !isStandalone() ? "App non installée" : "Non disponibles";
     btn.hidden = true; test.hidden = true; return null;
   }
   const reg = await navigator.serviceWorker.ready;
   const sub = await reg.pushManager.getSubscription();
-  if (Notification.permission === "denied") { st.textContent = "Bloquées. Réautorise-les dans les réglages de notifications de l'appareil, pour Notz."; btn.hidden = true; test.hidden = true; return null; }
-  st.textContent = sub ? "Actives sur cet appareil." : "Désactivées sur cet appareil.";
+  if (Notification.permission === "denied") { st.textContent = "Bloquées"; btn.hidden = true; test.hidden = true; $("#installHint").hidden = false; $("#installHint").textContent = "Les notifications sont bloquées. Réautorise-les dans Réglages > Notifications > Notz sur ton appareil."; return null; }
+  st.textContent = sub ? "Activées" : "Désactivées";
   btn.hidden = !!sub; test.hidden = !sub;
   return sub;
+}
+async function saveSub(sub) {
+  const j = sub.toJSON();
+  return sb.from("notz_push_subs").upsert({ endpoint: j.endpoint, user_id: state.user.id, p256dh: j.keys.p256dh, auth: j.keys.auth, ua: navigator.userAgent.slice(0, 200) });
 }
 async function enablePush() {
   const st = $("#pushState");
@@ -402,58 +478,52 @@ async function enablePush() {
     const perm = await Notification.requestPermission();
     if (perm !== "granted") { await pushStatus(); return; }
     const reg = await navigator.serviceWorker.ready;
-    let sub = await reg.pushManager.getSubscription();
-    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(CFG.vapid) });
-    const j = sub.toJSON();
-    const { error } = await sb.from("notz_push_subs").upsert({ endpoint: j.endpoint, user_id: state.user.id, p256dh: j.keys.p256dh, auth: j.keys.auth, ua: navigator.userAgent.slice(0, 200) });
+    const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(CFG.vapid) }));
+    const { error } = await saveSub(sub);
     if (error) throw error;
     try { localStorage.setItem("notz:push", "1"); } catch (e) { /* ignore */ }
     await pushStatus();
-  } catch (e) { st.textContent = "L'activation a échoué. Réessaie."; }
+  } catch (e) { st.textContent = "Échec, réessaie"; }
 }
 async function syncPushSub() {
   try {
     if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
-    const reg = await navigator.serviceWorker.ready;
-    const sub = await reg.pushManager.getSubscription();
-    if (!sub) return;
-    const j = sub.toJSON();
-    await sb.from("notz_push_subs").upsert({ endpoint: j.endpoint, user_id: state.user.id, p256dh: j.keys.p256dh, auth: j.keys.auth, ua: navigator.userAgent.slice(0, 200) });
+    const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
+    if (sub) await saveSub(sub);
   } catch (e) { /* best effort */ }
 }
 function maybeNudgePush() {
   let asked = false; try { asked = localStorage.getItem("notz:push") === "1"; } catch (e) { /* ignore */ }
   if (asked || !("Notification" in window) || Notification.permission !== "default") return;
-  say("Rappel enregistré. Active les notifications dans les réglages pour être prévenu app fermée.");
+  setStatus("Active les notifications dans ••• pour être prévenu");
 }
 $("#pushBtn").onclick = enablePush;
 $("#pushTest").onclick = async () => {
-  const st = $("#pushState"); st.textContent = "Envoi d'une notification de test…";
+  const st = $("#pushState"); st.textContent = "Envoi…";
   const { data, error } = await sb.functions.invoke("notz-push", { body: { test: true } });
-  st.textContent = error ? "Le test a échoué." : data?.sent ? "Notification envoyée. Elle doit arriver dans quelques secondes." : "Aucun appareil abonné. Touche « Activer sur cet appareil ».";
+  st.textContent = error ? "Échec du test" : data?.sent ? "Envoyée" : "Aucun appareil";
 };
 
 /* ---------- Settings ---------- */
-$("#settingsBtn").onclick = async () => {
-  const v = $("#settingsView"); v.hidden = !v.hidden;
-  if (!v.hidden) { $("#whoami").textContent = state.user?.email || ""; await pushStatus(); v.scrollIntoView({ behavior: "smooth" }); }
-};
-$("#closeSettings").onclick = () => { $("#settingsView").hidden = true; };
+$("#settingsBtn").onclick = async () => { $("#whoami").textContent = state.user?.email || ""; openSheet($("#settings")); await pushStatus(); };
+$("#setClose").onclick = () => closeSheet($("#settings"));
 $("#logoutBtn").onclick = async () => {
-  try { const reg = await navigator.serviceWorker.ready; const sub = await reg.pushManager.getSubscription(); if (sub) { await sb.from("notz_push_subs").delete().eq("endpoint", sub.endpoint); await sub.unsubscribe(); } } catch (e) { /* ignore */ }
+  try { const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription(); if (sub) { await sb.from("notz_push_subs").delete().eq("endpoint", sub.endpoint); await sub.unsubscribe(); } } catch (e) { /* ignore */ }
   try { localStorage.removeItem("notz:notes"); localStorage.removeItem("notz:push"); } catch (e) { /* ignore */ }
+  closeSheet($("#settings"));
   await sb.auth.signOut();
 };
 
 /* ---------- Boot ---------- */
-function showMain() {
-  $("#authView").hidden = true; $("#mainView").hidden = false; $("#settingsBtn").hidden = false;
-}
 async function onSession(session) {
-  if (!session) { state.user = null; state.notes = []; if (state.channel) { sb.removeChannel(state.channel); state.channel = null; } await showAuth(); return; }
+  if (!session) {
+    state.user = null; state.notes = [];
+    if (state.channel) { sb.removeChannel(state.channel); state.channel = null; }
+    await showAuth(); return;
+  }
   if (state.user && state.user.id === session.user.id) return;
   state.user = session.user;
-  showMain();
+  $("#authView").hidden = true; $("#homeView").hidden = false; $("#toolbar").hidden = false;
   state.notes = cachedNotes(); render();
   await loadNotes();
   subscribe();
@@ -464,8 +534,7 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.addEventListener("message", (e) => { if (e.data?.type === "open-note" && e.data.noteId) { state.focusId = e.data.noteId; setView("rem"); } });
 }
 if (location.hash.startsWith("#n-")) state.focusId = location.hash.slice(3);
-document.addEventListener("visibilitychange", () => { if (!document.hidden && state.user) loadNotes(); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden && state.user && $("#editor").hidden) loadNotes(); });
 window.addEventListener("online", () => { if (state.user) loadNotes(); });
-renderTagChips();
 sb.auth.onAuthStateChange((_evt, session) => { setTimeout(() => onSession(session), 0); });
 sb.auth.getSession().then(({ data }) => onSession(data.session));
