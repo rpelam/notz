@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Notz</title>
+<meta name="description" content="Notes, vocaux, photos et rappels, en un geste.">
+<meta name="theme-color" content="#a3242b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Notz">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <h1>Notz<span>.</span></h1>
+    <div class="top-right">
+      <span class="sync" id="status"></span>
+      <button type="button" class="icon-btn" id="settingsBtn" aria-label="Réglages" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Sign-in / first setup -->
+  <section class="card auth" id="authView" hidden>
+    <h2 id="authTitle">Connexion</h2>
+    <p class="muted" id="authIntro"></p>
+    <form id="authForm" novalidate>
+      <label for="authEmail">Courriel</label>
+      <input type="email" id="authEmail" autocomplete="username" required>
+      <label for="authPass">Mot de passe</label>
+      <input type="password" id="authPass" autocomplete="current-password" required minlength="8">
+      <div id="confirmWrap" hidden>
+        <label for="authPass2">Confirme le mot de passe</label>
+        <input type="password" id="authPass2" autocomplete="new-password" minlength="8">
+      </div>
+      <p class="msg" id="authMsg" role="status"></p>
+      <button type="submit" class="primary" id="authBtn">Se connecter</button>
+    </form>
+  </section>
+
+  <!-- Settings -->
+  <section class="card settings" id="settingsView" hidden>
+    <div class="settings-head"><h2>Réglages</h2><button type="button" class="link" id="closeSettings">Fermer</button></div>
+    <div class="setting">
+      <div>
+        <strong>Notifications de rappel</strong>
+        <p class="muted" id="pushState">…</p>
+      </div>
+      <div class="row">
+        <button type="button" class="act" id="pushBtn">Activer sur cet appareil</button>
+        <button type="button" class="act" id="pushTest" hidden>Tester</button>
+      </div>
+    </div>
+    <p class="muted small" id="installHint" hidden>Sur iPhone, les notifications n'existent que pour l'app installée : dans Safari, touche Partager puis « Sur l'écran d'accueil », et ouvre Notz depuis son icône.</p>
+    <div class="setting">
+      <div><strong>Compte</strong><p class="muted" id="whoami"></p></div>
+      <button type="button" class="act warn" id="logoutBtn">Se déconnecter</button>
+    </div>
+  </section>
+
+  <!-- Main -->
+  <div id="mainView" hidden>
+    <div class="banner" id="dueBanner" hidden>
+      <strong id="dueTitle">Rappel</strong>
+      <ul id="dueList"></ul>
+    </div>
+
+    <section class="card composer" aria-label="Nouvelle note">
+      <textarea id="noteText" placeholder="Une idée, un achat, un truc à relancer…&#10;« Rappelle-moi jeudi 10h d'appeler le fournisseur »"></textarea>
+      <div class="rec" id="recBar" hidden>
+        <span class="rec-dot" aria-hidden="true"></span>
+        <span id="recTime">0:00</span>
+        <button type="button" class="act" id="recStop">Terminer</button>
+        <button type="button" class="link" id="recCancel">Annuler</button>
+      </div>
+      <div class="attach" id="attachPreview"></div>
+      <div class="row">
+        <button type="button" class="tool" id="voiceBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>Vocal</button>
+        <label class="tool" for="photoInput"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Photo</label>
+        <input type="file" id="photoInput" accept="image/*" multiple hidden>
+        <button type="button" class="tool" id="remindBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 21h4"/></svg>Rappel</button>
+      </div>
+      <div class="remind" id="remindRow" hidden>
+        <input type="datetime-local" id="remindAt" aria-label="Date et heure du rappel">
+        <span class="detected" id="detected"></span>
+        <button type="button" class="link" id="clearRemind">Retirer</button>
+      </div>
+      <div class="chips" id="tagChips" aria-label="Étiquettes"></div>
+      <div class="save">
+        <span class="msg" id="msg" role="status"></span>
+        <button type="button" class="primary" id="saveBtn">Enregistrer</button>
+      </div>
+    </section>
+
+    <div class="bar">
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" id="tabRem" aria-selected="true">Rappels<span class="count" id="cntR"></span></button>
+        <button type="button" role="tab" id="tabAll" aria-selected="false">Tout<span class="count" id="cntA"></span></button>
+      </div>
+      <input type="search" id="search" placeholder="Chercher">
+    </div>
+    <div class="chips" id="filterChips" aria-label="Filtrer par étiquette"></div>
+
+    <section class="list" id="list" aria-live="polite"></section>
+    <p class="empty" id="empty" hidden></p>
+  </div>
+</div>
+<script src="vendor/supabase.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
